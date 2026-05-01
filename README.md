@@ -1,154 +1,172 @@
-# __NVIDIA_OSS__ Standard Repo Template
+# Numba-CUDA-MLIR — CUDA-like Programming Model for Python
 
-This README file is from the NVIDIA_OSS standard repo template of [PLC-OSS-Template](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template?tab=readme-ov-file). It provides a list of files in the PLC-OSS-Template and guidelines on how to use (clone and customize) them.
+numba-cuda-mlir provides a low-level programming model similar to CUDA C++ in Python.
+The main goals of the project are:
 
-**Upon completing the customization for the project repo, the repo admin should replace this README template with the project specific README file.**
+1. Do not inhibit experts
+2. Interoperate well with existing programming models
 
-- Files (org-wide templates in the NVIDIA .github org repo; per-repo overrides allowed) in [PLC-OSS-Template](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template?tab=readme-ov-file)
+numba-cuda-mlir is built on MLIR. We don't use any downstream dialects.
+This is not a wrapper around the MLIR Python bindings, however;
+user programs look like regular Python, and users do not need
+to be compiler experts to use it.
 
-   - Root 
-     - README.md skeleton (CTA + Quickstart + Support/Security/Governance links) 
-     - LICENSE (Apache 2.0 by default)
-        - For other licenses, see the [Confluence page](https://confluence.nvidia.com/pages/viewpage.action?pageId=788418816) for other licenses
-        - CLA.md file (delete if not using MIT or BSD licenses)
-     - CODE_OF_CONDUCT.md 
-     - SECURITY.md (vuln reporting path) 
-     - CONTRIBUTING.md (base; repo can add specifics)
-     - SUPPORT.md (Support levels/channels)
-     - GOVERNANCE.md (baseline; repo may extend)
-     - CITATION.md (for projects that need citation)
+## Quick Start
 
-   - .github/ 
-     - ISSUE_TEMPLATE/ (<https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository>)
-       - bug.yml, feature.yml, task.yml, config.yml 
-     - PULL_REQUEST_TEMPLATE.md (<https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository>)
-     - workflows/
-     - Note: workflow-templates/ for starter workflows should live in the org-level .github repo, not per-repo
+```python
+import numpy as np
+from numba_cuda_mlir import cuda
 
-   - Repo-specific (not org-template, maintained by the team)
-     - CODEOWNERS (place at .github/CODEOWNERS or repo root)
-     - CHANGELOG.md (or RELEASE.md) 
-     - ROADMAP.md 
-     - MAINTAINERS.md 
-     - NOTICE or THIRD_PARTY_NOTICES / THIRD_PARTY_LICENSES (dependency specific)
-     - Build/package files (CMake, pyproject, Dockerfile, etc.)
+@cuda.jit
+def vector_add(a, b, out):
+    i = cuda.grid(1)
+    if i < out.shape[0]:
+        out[i] = a[i] + b[i]
 
-   - Recommended structure and hygiene
-     - docs/
-     - examples/
-     - tests/
-     - scripts/
-     - Container/dev env: Dockerfile, docker/, .devcontainer/ (optional)
-     - Build/package (language-specific):
-       - Python: pyproject.toml, setup.cfg/setup.py, requirements.txt, environment.yml
-       - C++: CMakeLists.txt, cmake/, vcpkg.json
-     - Repo hygiene: .gitignore, .gitattributes, .editorconfig, .pre-commit-config.yaml, .clang-format
+n = 1_000_000
+a = np.ones(n, dtype=np.float32)
+b = np.ones(n, dtype=np.float32)
+out = np.zeros(n, dtype=np.float32)
 
-
-## Usage of [PLC-OSS-Template](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template?tab=readme-ov-file) for NEW NVIDIA OSS repos
-
-1. Clone the [PLC-OSS-Template](https://github.com/NVIDIA-GitHub-Management/PLC-OSS-Template?tab=readme-ov-file)
-2. Find/replace all in the clone of `___PROJECT___` and `__PROJECT_NAME__` with the name of the specific project.
-3. Inspect all files to make sure all replacements work and update text as needed
-
-
-**What you can reuse immediately**
-- CODE_OF_CONDUCT.md
-- SECURITY.md
-- CONTRIBUTING.md (base)
-- .github/ISSUE_TEMPLATE/.yml (bug/feature/task + config.yml)
-- .github/PULL_REQUEST_TEMPLATE.md
-- Reusable workflows 
-
-**What you must customize per repo**
-- README.md: copy the skeleton and fill in product-specific details (Quickstart, Requirements, Usage, Support level, links)
-- LICENSE: check file is correct, update year, consult Confluence for alternatives https://confluence.nvidia.com/pages/viewpage.action?pageId=788418816, add CLA.md only if your license/process requires it
-- CODEOWNERS: replace <TEAM> with your GitHub team handle(s). Place at .github/CODEOWNERS (or repo root)
-- MAINTAINERS.md: list maintainers names/roles, escalation path
-- CHANGELOG.md (or RELEASE.md): track releases/changes
-- SUPPORT.md: Update for your project
-- ROADMAP.md (optional): upcoming milestones
-- NOTICE / THIRD_PARTY_NOTICES (if you ship third‑party content)
-- Build/package files (CMake/pyproject/Dockerfile/etc.), tests/, docs/, examples/, scripts/ as appropriate
-- Workflows: Edit if you need custom behavior 
-
-
-4. Change git origin to point to new repo and push
-5. Remove the line break below and everything above it
-
-## Usage for existing NVIDIA OSS repos
-
-1. Follow the steps above, but add the files to your existing repo and merge
-
-<!-- REMOVE THE LINE BELOW AND EVERYTHING ABOVE -->
------------------------------------------
-# [Project Title]
-One-sentence value proposition for users. Who is it for, and why it matters. 
-
-# Overview
-What the project does? Why the project is useful?
-Provide a brief overview, highlighting key features or problem-solving capabilities.
-
-# Getting Started
-Guide users on how they can get started with the project. This should include basic installation step, quick-start examples 
-```bash
-# Option A: Package manager (pip/conda/npm/etc.)
-<copy-paste install>
-
-# Option B: Container
-docker run <image> <args>
-
-# Verify (hello world)
-<one-liner or ~10-line example>
+threads_per_block = 256
+blocks = (n + threads_per_block - 1) // threads_per_block
+vector_add[blocks, threads_per_block](a, b, out)
 ```
-# Requirements
-Include a list of pre-requisites. 
-- OS/Arch: <summary or link to full matrix>
-- Runtime/Compiler: <versions>
-- GPU/Drivers (if applicable): CUDA <ver>, driver <ver>, etc.
 
-# Usage
-```bash
-# Minimal runnable snippet (≤20 lines)
-<code>
+## Prerequisites
+
+- Python >= 3.12
+- NVIDIA GPU with a compatible driver (CUDA 12.2+ or 13.x)
+    - CUDA Toolkit is **not** required at build time (numba-cuda-mlir uses a driver API
+      shim header).
+    - CUDA Toolkit components (ex: nvJitLink, libNVVM) can be installed via pip (Linux/Windows), conda (Linux/Windows), or any system package manager (Linux).
+    - At runtime, CUDA driver and Toolkit components are dynamically loaded.
+    - Set `CUDA_HOME` if you need libdevice linking for older paths.
+
+The pinned LLVM commit is in [`ci/llvm-version.env`](ci/llvm-version.env).
+
+## Installation
+
+### Option 1: Pre-built wheel (fastest)
+
+CI publishes wheels to PyPI on tagged releases.
+No LLVM, cmake, or CUDA Toolkit needed:
+
+```shell
+pip install numba-cuda-mlir[cu13]
 ```
-- More examples/tutorials: <link>
-- API reference: <link>
 
-# Performance (Optional)
-Summary of benchmarks; link to detailed results and hardware used.
+Replace `cu13` with `cu12` for CUDA 12.x environments.
 
-## Releases & Roadmap 
-- Releases/Changelog: <link>
-- (Optional) Next milestones or link to `ROADMAP.md`.
-  
-# Contribution Guidelines
-- Start here: `CONTRIBUTING.md`
-- Code of Conduct: `CODE_OF_CONDUCT.md`
-- Development quickstart (build/test):
-```bash
-<clone> && <deps> && <build/test>
+### Option 2: Editable install with cached LLVM (recommended for development)
+
+CI caches pre-built LLVM artifacts via GitHub Actions. You can download them
+from a recent CI run instead of building LLVM from scratch.
+
+1. Download LLVM build artifacts from the latest successful CI run using the
+   [GitHub CLI](https://cli.github.com/):
+
+```shell
+gh run download --repo NVIDIA/numba-cuda-mlir \
+  -n "llvm-modern-install-cp312-linux-64" -D llvm-modern-install
+
+gh run download --repo NVIDIA/numba-cuda-mlir \
+  -n "llvm7-install-linux-64" -D llvm7-install
 ```
-## Governance & Maintainers
-- Governance: `GOVERNANCE.md`
-- Maintainers: <team/handles>
-- Labeling/triage policy: <link>
 
-## Security
-- Vulnerability disclosure: `SECURITY.md`
-- Do not file public issues for security reports.
+2. Create a venv and install numba-cuda-mlir in editable mode:
 
-## Support
-- Level: <Experimental | Maintained | Stable>
-- How to get help: Issues/Discussions/<channel link>
-- Response expectations (if any).
+```shell
+python3 -m venv numba-cuda-mlir-env && source numba-cuda-mlir-env/bin/activate
 
-# Community
-Provide the channel for community communications.
+MLIR_DIR=$PWD/llvm-modern-install/lib/cmake/mlir \
+LIBLLVM7=$PWD/llvm7-install/lib/libLLVM-7.so \
+  pip install -e '.[cu13,dev]'
+```
 
-# References
-Provide a list of related references
+### Option 3: Build LLVM from source
 
-# License
-This project is licensed under the [NAME HERE] License - see the LICENSE.md file for details
-- License: <link>
+If you need to modify LLVM/MLIR or want to build without cached artifacts:
+
+```shell
+# Install build prerequisites for the LLVM build scripts
+pip install pybind11 nanobind numpy ninja cmake sccache
+
+# Build modern LLVM + MLIR (uses ci/llvm-version.env for the commit)
+ci/build-llvm-modern.sh    # produces llvm-modern-install/
+
+# Build LLVM 7 shared library
+ci/build-llvm7.sh          # produces llvm7-install/
+
+# Then install numba-cuda-mlir as in Option 2:
+MLIR_DIR=$PWD/llvm-modern-install/lib/cmake/mlir \
+LIBLLVM7=$PWD/llvm7-install/lib/libLLVM-7.so \
+  pip install -e '.[cu13,dev]'
+```
+
+## Testing
+
+Our tests are placed in the `tests` directory.
+Using `pytest` from the project's root directory after installing numba-cuda-mlir will
+run our tests. `pytest-xdist` is installed with our testing dependencies, so
+they may be run in parallel with:
+
+```
+pytest -n 4
+```
+
+Some linker/linkable-code tests require pre-built CUDA test fixtures. Build them
+before running the full suite:
+
+```
+make -C tests/numba_cuda_tests/testing/
+export NUMBA_CUDA_MLIR_TEST_BIN_DIR=$PWD/tests/numba_cuda_tests/testing
+```
+
+Note that tests can fail when many threads are used due to the GPU running out of
+memory; we re-run tests that fail due to GPU out-of-memory errors by default.
+All other errors are reported as test failures.
+
+## Benchmarks
+
+```
+pytest tests/benchmarks/ --benchmark -s
+```
+
+## Pre-commit hooks
+
+We use [pre-commit hooks](https://pre-commit.com/) for formatting and basic linting that should
+be applied to every commit.
+They can be installed with:
+
+```
+pip install -e '.[dev]'
+pre-commit install
+```
+
+Then, every commit will be formatted and linted automatically.
+
+## Debugging
+
+To dump Numba IR and MLIR to stderr before the MLIR-to-NVVM pipeline, enable `dump` in the `@cuda.jit()` decorator options, e.g. `@cuda.jit(dump=True)`.
+To print the full list of available debug options, enable `help` in the `@cuda.jit()` decorator options, e.g. `@cuda.jit(help=True)`.
+
+## Licensing
+
+numba-cuda-mlir is distributed under the [Apache License 2.0](LICENSE).
+
+It incorporates the following third-party projects, each retained under its
+original license:
+
+1. [numba-cuda](https://github.com/NVIDIA/numba-cuda) — [BSD 2-Clause License](THIRD-PARTY-LICENSES)
+2. [cloudpickle](https://github.com/cloudpipe/cloudpickle) — [BSD 3-Clause License](THIRD-PARTY-LICENSES)
+3. [appdirs](https://github.com/ActiveState/appdirs) — [MIT License](THIRD-PARTY-LICENSES)
+4. [LLVM Project / EUDSL](https://github.com/llvm/llvm-project) — [Apache License 2.0 WITH LLVM-exception](THIRD-PARTY-LICENSES)
+5. [llm.py / llm.c](https://github.com/aterrel/llm.py) — [MIT License](THIRD-PARTY-LICENSES)
+
+See [`NOTICE`](NOTICE) for the full attribution map and per-component locations
+in this repository, and [`THIRD-PARTY-LICENSES`](THIRD-PARTY-LICENSES) for the
+verbatim upstream license texts.
+
+Contributions are accepted under the terms described in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
