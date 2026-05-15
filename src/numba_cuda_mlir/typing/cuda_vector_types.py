@@ -4,6 +4,8 @@
 Typing support for CUDA vector types (float32x4, int32x2, etc.)
 """
 
+import operator
+from numba_cuda_mlir.lowering_utilities.type_conversions import float_of_width
 from numba_cuda_mlir.numba_cuda.typing.templates import (
     AbstractTemplate,
     AttributeTemplate,
@@ -123,6 +125,115 @@ for vec_type in _vector_types:
     template = make_constructor_template(vec_type)
     registry.register(template)
     registry.register_global(vec_type, VectorTypeClass(vec_type, template))
+
+
+def _get_vector_type(dtype, length):
+    for vt in _vector_types:
+        if vt.dtype == dtype and vt.length == length:
+            return vt
+    return None
+
+
+def make_vector_binop_template(op):
+    class VectorBinOpTemplate(AbstractTemplate):
+        key = op
+
+        def generic(self, args, kws):
+            if len(args) != 2:
+                return None
+
+            lhs, rhs = args
+
+            if isinstance(lhs, VectorType) and isinstance(rhs, VectorType):
+                if op not in (operator.add, operator.iadd, operator.sub, operator.isub):
+                    return None
+
+                if lhs.length != rhs.length:
+                    return None
+                target_dtype = self.context.unify_types(lhs.dtype, rhs.dtype)
+                if target_dtype is None:
+                    return None
+
+                if op == operator.truediv and isinstance(target_dtype, types.Integer):
+                    bitwidth = max(target_dtype.bitwidth, 32)
+                    target_dtype = float_of_width(bitwidth)
+
+                restype = _get_vector_type(target_dtype, lhs.length)
+                if restype is None:
+                    return None
+                return signature(restype, lhs, rhs)
+
+            elif isinstance(lhs, VectorType) and isinstance(rhs, types.Number):
+                target_dtype = self.context.unify_types(lhs.dtype, rhs)
+                if target_dtype is None:
+                    return None
+
+                if op == operator.truediv and isinstance(target_dtype, types.Integer):
+                    bitwidth = max(target_dtype.bitwidth, 32)
+                    target_dtype = float_of_width(bitwidth)
+
+                restype = _get_vector_type(target_dtype, lhs.length)
+                if restype is None:
+                    return None
+                return signature(restype, lhs, rhs)
+
+            elif isinstance(lhs, types.Number) and isinstance(rhs, VectorType):
+                target_dtype = self.context.unify_types(lhs, rhs.dtype)
+                if target_dtype is None:
+                    return None
+
+                if op == operator.truediv and isinstance(target_dtype, types.Integer):
+                    bitwidth = max(target_dtype.bitwidth, 32)
+                    target_dtype = float_of_width(bitwidth)
+
+                restype = _get_vector_type(target_dtype, rhs.length)
+                if restype is None:
+                    return None
+                return signature(restype, lhs, rhs)
+
+            return None
+
+    VectorBinOpTemplate.__name__ = f"VectorBinOpTemplate_{op.__name__}"
+    return VectorBinOpTemplate
+
+
+for op in [
+    operator.add,
+    operator.iadd,
+    operator.sub,
+    operator.isub,
+    operator.mul,
+    operator.imul,
+    operator.truediv,
+    operator.itruediv,
+    operator.floordiv,
+    operator.ifloordiv,
+    operator.mod,
+    operator.imod,
+]:
+    registry.register_global(op, types.Function(make_vector_binop_template(op)))
+
+
+@registry.register_global(operator.neg)
+class VectorNegTemplate(AbstractTemplate):
+    def generic(self, args, kws):
+        if len(args) != 1:
+            return None
+        x = args[0]
+        if isinstance(x, VectorType):
+            return signature(x, x)
+        return None
+
+
+@registry.register_global(abs)
+class VectorAbsTemplate(AbstractTemplate):
+    def generic(self, args, kws):
+        if len(args) != 1:
+            return None
+        x = args[0]
+        if isinstance(x, VectorType):
+            return signature(x, x)
+        return None
 
 
 @registry.register_attr
