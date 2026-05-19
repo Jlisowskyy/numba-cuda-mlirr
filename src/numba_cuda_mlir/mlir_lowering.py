@@ -166,7 +166,7 @@ class MLIRLower(object):
         self._setup_callbacks = []
         self._teardown_callbacks = []
         for link_file in link_files:
-            self._link_external_item(link_file)
+            self.link_external_item(link_file)
 
         self._capi_sym_name = None
         if capi := self.targetoptions.get("capi", False):
@@ -1866,9 +1866,10 @@ extern "C" __global__ void
             )
 
         for link_item in fn_value.link:
-            self._link_external_item(link_item)
+            self.link_external_item(link_item)
 
-    def _link_external_item(self, link_item):
+    def link_external_item(self, link_item):
+        """Register an external code object with the active linker."""
         key = self._external_link_item_key(link_item)
         if key in self._linked_external_items:
             return
