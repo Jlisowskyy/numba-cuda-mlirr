@@ -27,6 +27,8 @@ from numba_cuda_mlir.numba_cuda.extending import (
     make_attribute_wrapper,
 )
 
+from numba_cuda_mlir.type_defs.vector_types import VectorType
+
 registry = Registry()
 infer = registry.register
 infer_global = registry.register_global
@@ -809,13 +811,20 @@ class NumberClassAttribute(AttributeTemplate):
                 if isinstance(val, types.Array) and val.ndim == 0 and val.dtype == ty:
                     # This is 0d array -> scalar degrading
                     return ty
-                else:
-                    # unsupported
-                    msg = f"Casting {val} to {ty} directly is unsupported."
-                    if isinstance(val, types.Array):
-                        # array casts are supported a different way.
-                        msg += f" Try doing '<array>.astype(np.{ty})' instead"
-                    raise errors.TypingError(msg)
+                elif (
+                    isinstance(val, VectorType)
+                    and val.length == 2
+                    and isinstance(ty, types.Complex)
+                    and isinstance(val.dtype, types.Float)
+                ):
+                    return ty
+
+                # unsupported
+                msg = f"Casting {val} to {ty} directly is unsupported."
+                if isinstance(val, types.Array):
+                    # array casts are supported a different way.
+                    msg += f" Try doing '<array>.astype(np.{ty})' instead"
+                raise errors.TypingError(msg)
 
         def typer_complex(val, imag):
             if ty in types.complex_domain:
