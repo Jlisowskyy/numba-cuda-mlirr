@@ -461,7 +461,7 @@ class _EnvReloader:
 
         # WAR for an LTO linking bug that erases float16/bfloat16 (and their
         # vector type) stores: when set, force opt_level=0 on LTO links
-        CUDA_DISABLE_LTO_OPT = _readenv("NUMBA_CUDA_DISABLE_LTO_OPT", int, 0)
+        CUDA_DISABLE_LTO_OPT = _readenv("NUMBA_CUDA_MLIR_DISABLE_LTO_OPT", int, 0)
 
         # Whether the default stream is the per-thread default stream
         CUDA_PER_THREAD_DEFAULT_STREAM = _readenv("NUMBA_CUDA_PER_THREAD_DEFAULT_STREAM", int, 0)

@@ -2182,7 +2182,7 @@ def _warn_lto_opt_risk():
     warnings.warn(
         "Linking LTOIR with optimization_level>0 can erase float16/bfloat16 "
         "(and their vector type) stores due to a known LTO linking bug."
-        "If results look wrong, set NUMBA_CUDA_DISABLE_LTO_OPT=1 to force "
+        "If results look wrong, set NUMBA_CUDA_MLIR_DISABLE_LTO_OPT=1 to force "
         "opt_level=0 on the LTO link.",
         category=NumbaWarning,
     )
@@ -2417,7 +2417,7 @@ class _Linker:
 
         # LTO cubin links at opt_level>0 can hit an linking bug that erases
         # float16/bfloat16 (and their vector type) stores. Keep opts on by
-        # default but warn. Allow opting out via NUMBA_CUDA_DISABLE_LTO_OPT,
+        # default but warn. Allow opting out via NUMBA_CUDA_MLIR_DISABLE_LTO_OPT,
         # which forces opt_level=0.
         lto_cubin_link = bool(lto_flag) and not ptx
         if lto_cubin_link and config.CUDA_DISABLE_LTO_OPT:
