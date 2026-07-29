@@ -14,10 +14,21 @@ from numba_cuda_mlir._whole_function_planners import (
     _WholeFunctionPlannerRegistry,
     _planner_registry,
 )
-from numba_cuda_mlir.extending import WholeFunctionPlanner, register_planner
+from numba_cuda_mlir._launch_config import (
+    _LAUNCH_CONFIG_TRACKER_METADATA_KEY,
+    _LaunchConfigTracker,
+)
+from numba_cuda_mlir.extending import (
+    WholeFunctionPlanner,
+    register_planner,
+    require_launch_config,
+)
 from numba_cuda_mlir.numba_cuda.compiler import run_frontend
 from numba_cuda_mlir.numba_cuda.core import ir
 from numba_cuda_mlir.numba_cuda.core.ir_utils import build_definitions
+
+
+_RECOMPILE_VALUE = 1
 
 
 @pytest.fixture
@@ -110,6 +121,78 @@ def test_planner_registration_and_result_contracts():
     registry.register(InvalidResultPlanner)
     with pytest.raises(TypeError, match=r"run\(\) must return bool"):
         registry.apply(_planner_state())
+
+
+def test_require_launch_config_contract():
+    launch_config = {
+        "grid": (1, 1, 1),
+        "block": (32, 1, 1),
+        "sharedmem": 0,
+        "cluster": None,
+    }
+    state = SimpleNamespace(metadata={"targetoptions": {"__launch_config__": launch_config}})
+
+    assert require_launch_config(state) is launch_config
+
+    state.metadata["targetoptions"].pop("__launch_config__")
+    tracker = _LaunchConfigTracker(launch_config)
+    state.metadata[_LAUNCH_CONFIG_TRACKER_METADATA_KEY] = tracker
+    promoted = require_launch_config(state)
+    assert promoted == launch_config
+    assert promoted is state.metadata["targetoptions"]["__launch_config__"]
+    assert promoted is not launch_config
+    assert tracker.required is True
+    assert require_launch_config(state) is promoted
+
+    state.metadata.pop(_LAUNCH_CONFIG_TRACKER_METADATA_KEY)
+    state.metadata["targetoptions"].pop("__launch_config__")
+    with pytest.raises(RuntimeError, match="configured kernel launch"):
+        require_launch_config(state)
+
+
+def test_require_launch_config_requires_compiler_metadata():
+    with pytest.raises(TypeError, match="metadata must be a dict"):
+        require_launch_config(SimpleNamespace())
+
+    with pytest.raises(TypeError, match="must contain targetoptions"):
+        require_launch_config(SimpleNamespace(metadata={}))
+
+
+def test_launch_config_promotion_is_visible_to_later_planners_in_same_attempt():
+    available_launch_config = {
+        "grid": (1, 1, 1),
+        "block": (32, 1, 1),
+        "sharedmem": None,
+        "cluster": None,
+    }
+    tracker = _LaunchConfigTracker(available_launch_config)
+    state = _planner_state()
+    state.metadata = {
+        "targetoptions": {},
+        _LAUNCH_CONFIG_TRACKER_METADATA_KEY: tracker,
+    }
+    registry = _WholeFunctionPlannerRegistry()
+    promoted = []
+    observed = []
+
+    class RequiringPlanner(WholeFunctionPlanner):
+        def run(self):
+            promoted.append(require_launch_config(self.state))
+            return False
+
+    class ObservingPlanner(WholeFunctionPlanner):
+        def run(self):
+            observed.append(self.state.metadata["targetoptions"]["__launch_config__"])
+            return False
+
+    registry.register(RequiringPlanner)
+    registry.register(ObservingPlanner)
+
+    assert registry.apply(state) is False
+    assert len(promoted) == 1
+    assert observed == promoted
+    assert promoted[0]["sharedmem"] == 0
+    assert tracker.required is True
 
 
 def test_ir_is_repaired_between_modifying_planners():
@@ -248,6 +331,81 @@ def test_planner_registered_during_compile_prevents_persistent_cache_save(
     assert dispatcher._cache_misses[(types.int32,)] == 1
 
 
+@pytest.mark.skipif(not cuda.is_available(), reason="CUDA GPU required")
+def test_retained_generic_launcher_rebinds_after_recompile(isolated_global_planners):
+    global _RECOMPILE_VALUE
+
+    class HarmlessPlanner(WholeFunctionPlanner):
+        def run(self):
+            return False
+
+    @cuda.jit
+    def kernel(out):
+        out[0] = _RECOMPILE_VALUE
+
+    register_planner(HarmlessPlanner)
+    retained_launcher = kernel[1, 32]
+    out = np.zeros(1, dtype=np.int32)
+
+    try:
+        _RECOMPILE_VALUE = 1
+        retained_launcher(out)
+        _RECOMPILE_VALUE = 2
+        kernel.recompile()
+        retained_launcher(out)
+
+        assert out[0] == 2
+        assert retained_launcher._kernel_dispatcher is kernel._c
+        assert kernel._requires_launch_config is False
+    finally:
+        _RECOMPILE_VALUE = 1
+
+
+@pytest.mark.skipif(not cuda.is_available(), reason="CUDA GPU required")
+def test_retained_launch_launcher_rebinds_after_recompile(isolated_global_planners):
+    global _RECOMPILE_VALUE
+
+    from numba_cuda_mlir import descriptor as descriptor_mod
+
+    class HarmlessPlanner(WholeFunctionPlanner):
+        def run(self):
+            return False
+
+    class LaunchConfigExtension:
+        uses_launch_config = True
+
+        def prepare_args(self, ty, val, stream=None, retr=None):
+            return ty, val
+
+    @cuda.jit(extensions=[LaunchConfigExtension()])
+    def kernel(out):
+        out[0] = _RECOMPILE_VALUE
+
+    register_planner(HarmlessPlanner)
+    retained_launcher = kernel[1, 32]
+    out = np.zeros(1, dtype=np.int32)
+
+    try:
+        _RECOMPILE_VALUE = 1
+        retained_launcher(out)
+        retained_generation = retained_launcher._launch_config_generation
+        kernel.extensions.clear()
+        _RECOMPILE_VALUE = 2
+        kernel.recompile()
+        retained_launcher(out)
+
+        assert out[0] == 2
+        assert retained_launcher._launch_config_generation != retained_generation
+        assert kernel._is_kernel_dispatcher_registered(
+            retained_launcher._launch_config,
+            retained_launcher._kernel_dispatcher,
+            retained_launcher._launch_config_generation,
+        )
+        assert not hasattr(descriptor_mod._compile_arg_types, "launch_config")
+    finally:
+        _RECOMPILE_VALUE = 1
+
+
 def _post_inline_marker(value):
     return value
 
@@ -316,6 +474,27 @@ class _MarkerPlanner(WholeFunctionPlanner):
         return modified
 
 
+class _LaunchConfigPlanner(WholeFunctionPlanner):
+    attempts = 0
+    launch_configs = []
+
+    def run(self):
+        if self.is_device_function:
+            return False
+        type(self).attempts += 1
+        type(self).launch_configs.append(dict(require_launch_config(self.state)))
+        return False
+
+
+class _CountingPlanner(WholeFunctionPlanner):
+    attempts = 0
+
+    def run(self):
+        if not self.is_device_function:
+            type(self).attempts += 1
+        return False
+
+
 def test_planner_pass_runs_after_device_inlining_without_gpu(
     isolated_global_planners,
 ):
@@ -369,6 +548,28 @@ def test_planner_runs_for_device_function_compilation_without_gpu(
     assert _MarkerPlanner.device_runs == 1
 
 
+def test_direct_compile_reports_missing_configured_launch(isolated_global_planners):
+    _LaunchConfigPlanner.attempts = 0
+    _LaunchConfigPlanner.launch_configs = []
+    register_planner(_LaunchConfigPlanner)
+
+    def kernel(output):
+        output[0] = 1
+
+    with pytest.raises(RuntimeError, match="compile through a configured kernel launch") as exc:
+        compiler.compile(
+            kernel,
+            types.void(types.int32[::1]),
+            device=False,
+            abi="numba",
+            cc=(8, 0),
+        )
+
+    assert type(exc.value) is RuntimeError
+    assert exc.value.__cause__ is None
+    assert _LaunchConfigPlanner.attempts == 1
+
+
 @pytest.mark.skipif(not cuda.is_available(), reason="CUDA GPU required")
 def test_planner_sees_inline_device_function_body(isolated_global_planners):
     _MarkerPlanner.kernel_runs = 0
@@ -392,3 +593,68 @@ def test_planner_sees_inline_device_function_body(isolated_global_planners):
     np.testing.assert_array_equal(h_output, h_input)
     assert _MarkerPlanner.kernel_runs == 1
     assert _MarkerPlanner.device_runs == 0
+    assert kernel._requires_launch_config is False
+    assert kernel.overloads
+    assert not kernel._launch_config_overloads
+
+
+@pytest.mark.skipif(not cuda.is_available(), reason="CUDA GPU required")
+def test_planner_can_request_distinct_launch_config_specializations(
+    isolated_global_planners,
+    monkeypatch,
+):
+    from numba_cuda_mlir import mlir_compiler
+
+    _CountingPlanner.attempts = 0
+    _LaunchConfigPlanner.attempts = 0
+    _LaunchConfigPlanner.launch_configs = []
+    ast_targetoptions = []
+    apply_ast_transforms = mlir_compiler.apply_ast_transforms
+
+    def observe_ast_targetoptions(pyfunc, targetoptions, args):
+        ast_targetoptions.append(dict(targetoptions))
+        assert "__launch_config_tracker__" not in targetoptions
+        return apply_ast_transforms(pyfunc, targetoptions, args)
+
+    monkeypatch.setattr(
+        mlir_compiler,
+        "apply_ast_transforms",
+        observe_ast_targetoptions,
+    )
+    register_planner(_CountingPlanner)
+    register_planner(_LaunchConfigPlanner)
+
+    @cuda.jit
+    def kernel(output):
+        output[0] = cuda.blockDim.x
+
+    launch32 = kernel[1, 32]
+    launch64 = kernel[1, 64]
+    output32 = np.zeros(1, dtype=np.int32)
+    output64 = np.zeros(1, dtype=np.int32)
+
+    launch32(output32)
+    launch64(output64)
+    launch32(output32)
+
+    assert output32[0] == 32
+    assert output64[0] == 64
+    assert _CountingPlanner.attempts == 2
+    assert _LaunchConfigPlanner.attempts == 2
+    assert len(ast_targetoptions) == 2
+    assert "__launch_config__" not in ast_targetoptions[0]
+    assert ast_targetoptions[1]["__launch_config__"]["block"] == (64, 1, 1)
+    assert [config["block"] for config in _LaunchConfigPlanner.launch_configs] == [
+        (32, 1, 1),
+        (64, 1, 1),
+    ]
+    assert kernel._requires_launch_config is True
+    assert not kernel.overloads
+    launch_blocks = {
+        dict(launch_config_key)["block"]
+        for _argtypes, launch_config_key in kernel._launch_config_overloads
+    }
+    assert launch_blocks == {(32, 1, 1), (64, 1, 1)}
+
+    configured_after_demand = kernel.configure(1, 32)
+    assert configured_after_demand._launch_config["block"] == (32, 1, 1)
