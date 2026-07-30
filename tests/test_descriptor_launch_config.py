@@ -13,7 +13,10 @@ from numba_cuda_mlir import cuda
 from numba_cuda_mlir.cuda.experimental import consteval, current_target_options
 from numba_cuda_mlir.descriptor import _ArgMarshaller
 from numba_cuda_mlir._launch_config import _LAUNCH_CONFIG_TRACKER_OPTION
-from numba_cuda_mlir._whole_function_planners import _RequireLaunchConfig
+from numba_cuda_mlir._whole_function_planners import (
+    _planner_registry,
+    _RequireLaunchConfig,
+)
 from numba_cuda_mlir.numba_cuda import types, typing as cuda_typing
 
 
@@ -24,6 +27,20 @@ class _Dispatcher:
         self.overloads = {}
         self._launch_config_lock = threading.RLock()
         self.remembered_dispatchers = []
+
+    def _get_ready_launch(
+        self,
+        argtypes,
+        available_launch_config,
+        configured_launch_config,
+        configured_kernel_dispatcher,
+        configured_launch_config_generation,
+    ):
+        return (
+            configured_kernel_dispatcher,
+            configured_launch_config_generation,
+            configured_launch_config,
+        )
 
     def _remember_kernel_dispatcher(
         self,
@@ -236,6 +253,10 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
     dispatcher._requires_launch_config = True
     prepare_calls = []
     launches = []
+    ready_launch = None
+
+    def get_ready_launch(*args):
+        return ready_launch
 
     def prepare_for_launch(
         args,
@@ -245,6 +266,7 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
         configured_kernel_dispatcher,
         configured_launch_config_generation,
     ):
+        nonlocal ready_launch
         prepare_calls.append(
             (
                 args,
@@ -255,7 +277,8 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
                 configured_launch_config_generation,
             )
         )
-        return launch_kernel_dispatcher, 7, active_launch_config
+        ready_launch = launch_kernel_dispatcher, 7, active_launch_config
+        return ready_launch
 
     def launch_configuration(
         kernel_dispatcher,
@@ -282,6 +305,7 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
 
         return launch
 
+    dispatcher._get_ready_launch = get_ready_launch
     dispatcher._prepare_for_launch = prepare_for_launch
     monkeypatch.setattr(descriptor_mod, "LaunchConfiguration", launch_configuration)
 
@@ -296,15 +320,14 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
     assert marshaller() == "qualified"
     assert marshaller() == "qualified"
     assert prepare_calls == [
-        ((), (), available_launch_config, None, generic_kernel_dispatcher, None),
         (
             (),
             (),
             available_launch_config,
-            active_launch_config,
-            launch_kernel_dispatcher,
-            7,
-        ),
+            None,
+            generic_kernel_dispatcher,
+            None,
+        )
     ]
     assert launches == [
         (
@@ -318,9 +341,7 @@ def test_arg_marshaller_rebinds_to_requested_launch_configuration(monkeypatch):
     ]
     assert marshaller._launch_config == active_launch_config
     assert marshaller._launch_config_generation == 7
-    assert dispatcher.remembered_dispatchers == [
-        (active_launch_config, launch_kernel_dispatcher, active_launch_config, 7)
-    ]
+    assert dispatcher.remembered_dispatchers == []
     assert not hasattr(descriptor_mod._compile_arg_types, "launch_config")
     assert not hasattr(descriptor_mod._compile_arg_types, "available_launch_config")
 
@@ -343,6 +364,7 @@ def test_arg_marshaller_rebinds_for_retained_launch_extension_snapshot(monkeypat
         prepare_calls.append(args)
         return refreshed_kernel_dispatcher, 8, launch_config
 
+    dispatcher._get_ready_launch = lambda *args: None
     dispatcher._prepare_for_launch = prepare_for_launch
     monkeypatch.setattr(
         descriptor_mod,
@@ -375,7 +397,7 @@ def test_arg_marshaller_rebinds_for_retained_launch_extension_snapshot(monkeypat
     assert marshaller._launch_config_generation == 8
 
 
-def test_arg_marshaller_refreshes_launch_config_dispatcher():
+def test_arg_marshaller_ready_launch_does_not_mutate_dispatcher_registration():
     dispatcher = _Dispatcher()
     launch_config = {
         "grid": (1, 1, 1),
@@ -395,9 +417,7 @@ def test_arg_marshaller_refreshes_launch_config_dispatcher():
     marshaller()
     marshaller()
 
-    assert dispatcher.remembered_dispatchers == [
-        (launch_config, kernel_dispatcher, launch_config, None)
-    ]
+    assert dispatcher.remembered_dispatchers == []
 
 
 def test_configure_records_normalized_launch_config(monkeypatch):
@@ -568,7 +588,139 @@ def test_prelaunch_uses_retained_launch_extension_snapshot(monkeypatch):
         retained_generation,
         retained_launch_config,
     )
-    assert observed_configs == [retained_launch_config, retained_launch_config]
+    assert observed_configs == [retained_launch_config]
+
+
+def test_ready_launch_known_signature_avoids_lock_and_overload_iteration(monkeypatch):
+    def kernel():
+        pass
+
+    dispatcher = descriptor_mod.MLIRDispatcher(kernel)
+
+    class ExactOnlyOverloads(dict):
+        def items(self):
+            pytest.fail("the unlocked readiness check must not iterate overloads")
+
+        def __iter__(self):
+            pytest.fail("the unlocked readiness check must not iterate overloads")
+
+    dispatcher.overloads = ExactOnlyOverloads({(): object()})
+    monkeypatch.setattr(_planner_registry, "_planners", [object()])
+
+    monkeypatch.setattr(
+        descriptor_mod.global_compiler_lock,
+        "acquire",
+        lambda: pytest.fail("known signatures must not take the global compiler lock"),
+    )
+
+    marshaller = _ArgMarshaller(
+        lambda: "launched",
+        dispatcher=dispatcher,
+        kernel_dispatcher=dispatcher._c,
+    )
+
+    assert marshaller() == "launched"
+
+
+def test_prelaunch_rechecks_readiness_after_global_compiler_lock(monkeypatch):
+    def kernel():
+        pass
+
+    dispatcher = descriptor_mod.MLIRDispatcher(kernel)
+    events = []
+    original_ready_launch = dispatcher._get_ready_launch
+
+    def observe_ready_launch(*args, **kwargs):
+        events.append("ready")
+        return original_ready_launch(*args, **kwargs)
+
+    original_acquire = descriptor_mod.global_compiler_lock.acquire
+
+    def publish_during_acquire():
+        original_acquire()
+        events.append("lock")
+        dispatcher.overloads[()] = object()
+
+    monkeypatch.setattr(dispatcher, "_get_ready_launch", observe_ready_launch)
+    monkeypatch.setattr(descriptor_mod.global_compiler_lock, "acquire", publish_during_acquire)
+    monkeypatch.setattr(_planner_registry, "_planners", [object()])
+    monkeypatch.setattr(
+        dispatcher,
+        "_compile_impl",
+        lambda args: pytest.fail("the signature was published while waiting for the lock"),
+    )
+
+    def launcher():
+        events.append("launch")
+        return "launched"
+
+    marshaller = _ArgMarshaller(
+        launcher,
+        dispatcher=dispatcher,
+        kernel_dispatcher=dispatcher._c,
+    )
+
+    assert marshaller() == "launched"
+    assert events == ["ready", "lock", "ready", "launch"]
+
+
+def test_ready_launch_validates_specialized_state():
+    def kernel(value):
+        pass
+
+    dispatcher = descriptor_mod.MLIRDispatcher(
+        kernel,
+        targetoptions={"extensions": [_LaunchConfigExtension()]},
+    )
+    launch_config = {
+        "grid": (1, 1, 1),
+        "block": (32, 1, 1),
+        "sharedmem": 0,
+        "cluster": None,
+    }
+    argtypes = (types.int32,)
+    launch_key = descriptor_mod._launch_config_key(launch_config)
+    kernel_dispatcher, generation = dispatcher._get_kernel_dispatcher_and_generation(launch_config)
+    dispatcher._launch_config_overloads[(argtypes, launch_key)] = object()
+
+    assert dispatcher._get_ready_launch(
+        argtypes,
+        launch_config,
+        launch_config,
+        kernel_dispatcher,
+        generation,
+    ) == (kernel_dispatcher, generation, launch_config)
+    assert (
+        dispatcher._get_ready_launch(
+            argtypes,
+            launch_config,
+            launch_config,
+            object(),
+            generation,
+        )
+        is None
+    )
+    assert (
+        dispatcher._get_ready_launch(
+            argtypes,
+            launch_config,
+            launch_config,
+            kernel_dispatcher,
+            generation + 1,
+        )
+        is None
+    )
+    dispatcher._launch_config_overloads.clear()
+    assert (
+        dispatcher._get_ready_launch(
+            argtypes,
+            launch_config,
+            launch_config,
+            kernel_dispatcher,
+            generation,
+        )
+        is None
+    )
 
 
 def test_launch_config_configure_reports_invalid_sharedmem():

@@ -434,8 +434,6 @@ class _ArgMarshaller:
         self._launch_config_generation = launch_config_generation
         self._stream_ref = stream_ref
         self._launch_stream = launch_stream
-        self._kernel_dispatcher_registered = False
-        self._kernel_dispatcher_registration_lock = threading.Lock()
         self._sig_cache = {}  # {type_key: (argtypes, fast_ok)}
         self._array_sig_cache = {}  # {type_key: [(argtypes, ((idx, array_key), ...))]}
 
@@ -614,32 +612,32 @@ class _ArgMarshaller:
             active_launch_config_generation = self._launch_config_generation
             launcher = self._launcher
             dispatcher = self._dispatcher
-            snapshot_launch_config_is_stale = _extensions_use_launch_config(
-                self._extensions
-                if self._has_extension_snapshot
-                else getattr(dispatcher, "extensions", ())
-            ) and self._launch_config_generation != getattr(
-                dispatcher,
-                "_launch_config_generation",
-                self._launch_config_generation,
-            )
             if dispatcher is not None and (
                 _planner_registry.has_planners
                 or getattr(dispatcher, "_requires_launch_config", False)
-                or snapshot_launch_config_is_stale
+                or self._launch_config is not None
             ):
-                (
-                    active_kernel_dispatcher,
-                    active_launch_config_generation,
-                    active_launch_config,
-                ) = dispatcher._prepare_for_launch(
-                    tuple(launch_args),
+                ready_launch = dispatcher._get_ready_launch(
                     tuple(argtypes),
                     self._available_launch_config,
                     self._launch_config,
                     self._kernel_dispatcher,
                     self._launch_config_generation,
                 )
+                if ready_launch is None:
+                    ready_launch = dispatcher._prepare_for_launch(
+                        tuple(launch_args),
+                        tuple(argtypes),
+                        self._available_launch_config,
+                        self._launch_config,
+                        self._kernel_dispatcher,
+                        self._launch_config_generation,
+                    )
+                (
+                    active_kernel_dispatcher,
+                    active_launch_config_generation,
+                    active_launch_config,
+                ) = ready_launch
                 if (
                     active_kernel_dispatcher is not self._kernel_dispatcher
                     or active_launch_config != self._launch_config
@@ -661,40 +659,15 @@ class _ArgMarshaller:
                         launcher_config["sharedmem"],
                         launcher_config.get("cluster"),
                     )
-                    with self._kernel_dispatcher_registration_lock:
-                        self._launcher = launcher
-                        self._launch_config = active_launch_config
-                        self._kernel_dispatcher = active_kernel_dispatcher
-                        self._launch_config_generation = active_launch_config_generation
-                        self._kernel_dispatcher_registered = False
+                    self._launcher = launcher
+                    self._launch_config = active_launch_config
+                    self._kernel_dispatcher = active_kernel_dispatcher
+                    self._launch_config_generation = active_launch_config_generation
 
             if active_launch_config is not None:
                 _compile_arg_types.launch_config = active_launch_config
             elif hasattr(_compile_arg_types, "launch_config"):
                 delattr(_compile_arg_types, "launch_config")
-            if (
-                dispatcher is not None
-                and active_launch_config is not None
-                and active_kernel_dispatcher is not None
-            ):
-                with self._kernel_dispatcher_registration_lock:
-                    if self._kernel_dispatcher_registered and hasattr(
-                        dispatcher, "_is_kernel_dispatcher_registered"
-                    ):
-                        self._kernel_dispatcher_registered = (
-                            dispatcher._is_kernel_dispatcher_registered(
-                                active_launch_config,
-                                active_kernel_dispatcher,
-                                active_launch_config_generation,
-                            )
-                        )
-                    if not self._kernel_dispatcher_registered:
-                        self._kernel_dispatcher_registered = dispatcher._remember_kernel_dispatcher(
-                            active_launch_config,
-                            active_kernel_dispatcher,
-                            active_launch_config_generation,
-                            replace_existing=False,
-                        )
             return launcher(*launch_args)
         except UserFacingInternalCompilerError as e:
             if os.environ.get("NUMBA_CUDA_MLIR_ICE_FULL_TB", "0").strip() == "1":
@@ -2447,6 +2420,53 @@ class MLIRDispatcher(Dispatcher, serialize.ReduceMixin):
                 return cres
         return None
 
+    def _get_ready_launch(
+        self,
+        argtypes,
+        available_launch_config,
+        configured_launch_config,
+        configured_kernel_dispatcher,
+        configured_launch_config_generation,
+    ):
+        """Return current launch state, or None when preparation is required."""
+
+        if configured_launch_config is None and not self._requires_launch_config:
+            kernel_dispatcher = self._c
+            if (
+                configured_kernel_dispatcher is not kernel_dispatcher
+                or configured_launch_config_generation is not None
+                or self.overloads.get(argtypes) is None
+            ):
+                return None
+            # Launch sensitivity or the native dispatcher may have changed
+            # during the unlocked overload lookup.
+            if self._requires_launch_config or self._c is not kernel_dispatcher:
+                return None
+            return kernel_dispatcher, None, None
+
+        with self._launch_config_lock:
+            launch_config = (
+                _normalize_available_launch_config(available_launch_config)
+                if self._requires_launch_config
+                else configured_launch_config
+            )
+            if launch_config is None:
+                return None
+            launch_config_key = _launch_config_key(launch_config)
+            if (
+                self._find_launch_config_overload_locked(argtypes, launch_config_key) is None
+                or configured_launch_config_generation != self._launch_config_generation
+                or self._launch_config_dispatchers.get(launch_config_key)
+                is not configured_kernel_dispatcher
+            ):
+                return None
+            self._launch_config_dispatchers.move_to_end(launch_config_key)
+            return (
+                configured_kernel_dispatcher,
+                configured_launch_config_generation,
+                launch_config,
+            )
+
     @global_compiler_lock
     def _prepare_for_launch(
         self,
@@ -2462,12 +2482,40 @@ class MLIRDispatcher(Dispatcher, serialize.ReduceMixin):
                 return _normalize_available_launch_config(available_launch_config)
             return configured_launch_config
 
+        ready_launch = self._get_ready_launch(
+            argtypes,
+            available_launch_config,
+            configured_launch_config,
+            configured_kernel_dispatcher,
+            configured_launch_config_generation,
+        )
+        if ready_launch is not None:
+            return ready_launch
+
         launch_config = active_launch_config()
-        if self._compile_result_for(argtypes, launch_config) is None:
+        compile_result = self._compile_result_for(argtypes, launch_config)
+        if compile_result is None:
+            if (
+                launch_config is not None
+                and not self._requires_launch_config
+                and configured_launch_config is not None
+                and configured_kernel_dispatcher is not None
+                and configured_launch_config_generation is not None
+            ):
+                # Cache eviction removes both the overload and its native
+                # dispatcher registration. Restore a retained dispatcher only
+                # while its generation is still current.
+                self._remember_kernel_dispatcher(
+                    launch_config,
+                    configured_kernel_dispatcher,
+                    configured_launch_config_generation,
+                    replace_existing=False,
+                )
             self._compile_impl(list(args))
             launch_config = active_launch_config()
+            compile_result = self._compile_result_for(argtypes, launch_config)
 
-        if self._compile_result_for(argtypes, launch_config) is None:
+        if compile_result is None:
             raise RuntimeError(
                 "kernel precompilation completed without publishing a matching overload"
             )
