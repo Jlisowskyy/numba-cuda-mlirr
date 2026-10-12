@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
+import pytest
 from numba_cuda_mlir import cuda
 
 NP_TRUE = np.bool_(True)
 NP_FALSE = np.bool_(False)
 NP_F32 = np.float32(3.5)
 NP_I8 = np.int8(7)
+PY_COMPLEX = 2.0 - 1.5j
+NP_C64 = np.complex64(2.0 - 1.5j)
 
 
 def test_np_bool_global_in_branch():
@@ -60,3 +63,25 @@ def test_np_scalar_globals_arithmetic():
     out = cuda.to_device(np.zeros(2, dtype=np.float64))
     k[1, 1](out)
     np.testing.assert_allclose(out.copy_to_host(), [7.0, 8.0])
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128], ids=["c64", "c128"])
+def test_complex_global_cast(dtype):
+    @cuda.jit
+    def k(out):
+        out[0] = dtype(PY_COMPLEX)
+
+    out = cuda.to_device(np.zeros(1, dtype=dtype))
+    k[1, 1](out)
+    np.testing.assert_array_equal(out.copy_to_host(), [PY_COMPLEX])
+
+
+def test_complex_global_arithmetic():
+    @cuda.jit
+    def k(out):
+        out[0] = PY_COMPLEX * 2
+        out[1] = NP_C64 + 1
+
+    out = cuda.to_device(np.zeros(2, dtype=np.complex128))
+    k[1, 1](out)
+    np.testing.assert_array_equal(out.copy_to_host(), [4.0 - 3.0j, 3.0 - 1.5j])
