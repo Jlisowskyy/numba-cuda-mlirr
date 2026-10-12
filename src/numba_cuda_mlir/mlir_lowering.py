@@ -1331,6 +1331,8 @@ extern "C" __global__ void
                 return tuple(map(self.lower_literal_if_needed, value))
             case np.ndarray():
                 return self.lower_array_literal(value, numba_type)
+            case complex() if numba_type is not None:
+                return constant(value, self.get_mlir_type(numba_type))
             case np.number() | np.bool_():
                 # np.bool_ is not an np.number but lowers the same way.
                 mlir_type = to_mlir_type(value.dtype)

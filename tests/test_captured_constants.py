@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from types import ModuleType
+
 import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
@@ -10,6 +12,7 @@ NP_F32 = np.float32(3.5)
 NP_I8 = np.int8(7)
 PY_COMPLEX = 2.0 - 1.5j
 NP_C64 = np.complex64(2.0 - 1.5j)
+COMPLEX_TUPLE = (2.0 - 1.5j, 0.5j)
 
 
 def test_np_bool_global_in_branch():
@@ -85,3 +88,28 @@ def test_complex_global_arithmetic():
     out = cuda.to_device(np.zeros(2, dtype=np.complex128))
     k[1, 1](out)
     np.testing.assert_array_equal(out.copy_to_host(), [4.0 - 3.0j, 3.0 - 1.5j])
+
+
+def test_complex_global_tuple():
+    @cuda.jit
+    def k(out):
+        out[0] = np.complex128(COMPLEX_TUPLE[0])
+        out[1] = COMPLEX_TUPLE[1]
+
+    out = cuda.to_device(np.zeros(2, dtype=np.complex128))
+    k[1, 1](out)
+    np.testing.assert_array_equal(out.copy_to_host(), list(COMPLEX_TUPLE))
+
+
+def test_complex_closure_tuple():
+    def make_kernel(captured):
+        @cuda.jit
+        def k(out):
+            out[0] = np.complex128(captured[0])
+            out[1] = captured[1]
+
+        return k
+
+    out = cuda.to_device(np.zeros(2, dtype=np.complex128))
+    make_kernel(COMPLEX_TUPLE)[1, 1](out)
+    np.testing.assert_array_equal(out.copy_to_host(), list(COMPLEX_TUPLE))
