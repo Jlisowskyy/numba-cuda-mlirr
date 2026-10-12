@@ -24,6 +24,7 @@ import logging
 import threading
 import asyncio
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import re
@@ -2748,7 +2749,7 @@ def inspect_obj_content(objpath: str):
     """
     code_types: set[str] = set()
 
-    cuobjdump_path = pathfinder.find_nvidia_binary_utility("cuobjdump")
+    cuobjdump_path = pathfinder.find_nvidia_binary_utility("cuobjdump") or shutil.which("cuobjdump")
     if cuobjdump_path is None:
         raise RuntimeError(
             "cuobjdump has not been found. It is included with the CUDA "

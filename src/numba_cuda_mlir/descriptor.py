@@ -7,6 +7,7 @@ import operator
 import sys
 import sysconfig
 import os
+import shutil
 import threading
 from functools import cached_property
 
@@ -3482,7 +3483,9 @@ class MLIRDispatcher(Dispatcher, serialize.ReduceMixin):
         if cubin is None:
             raise RuntimeError("No cubin available for disassembly")
 
-        nvdisasm_path = pathfinder.find_nvidia_binary_utility("nvdisasm")
+        nvdisasm_path = pathfinder.find_nvidia_binary_utility("nvdisasm") or shutil.which(
+            "nvdisasm"
+        )
         if nvdisasm_path is None:
             raise RuntimeError(
                 "nvdisasm has not been found. It is included with the CUDA "
