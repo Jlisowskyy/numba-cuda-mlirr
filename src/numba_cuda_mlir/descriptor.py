@@ -3489,9 +3489,10 @@ class MLIRDispatcher(Dispatcher, serialize.ReduceMixin):
         if nvdisasm_path is None:
             raise RuntimeError(
                 "nvdisasm has not been found. It is included with the CUDA "
-                "toolkit: install the toolkit on your system or install a "
-                "Python-packaged toolkit in this environment (for example "
-                "cuda-toolkit with the nvdisasm extra).\n"
+                "toolkit: install the toolkit on your system or, for CUDA 13 "
+                "and newer, install a Python-packaged toolkit in this environment "
+                "(for example cuda-toolkit with the nvdisasm extra). "
+                "The Python-packaged nvdisasm is not available for CUDA 12.\n"
             )
 
         with tempfile.TemporaryDirectory() as tmpdir:
